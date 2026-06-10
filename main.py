@@ -1,5 +1,5 @@
 """
-WeekPlanner API — FastAPI + SQLAlchemy (Atualizado para PostgreSQL/Neon.tech)
+WeekPlanner API — FastAPI + SQLAlchemy (Com Avisos e Cloud Sync)
 """
 from __future__ import annotations
 import os
@@ -15,18 +15,14 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Session, relationship, sessionmaker
 
 # ─────────────────────────────────────────────
-# DATABASE CONFIG (Inteligência Híbrida: Local ou Nuvem)
+# DATABASE CONFIG
 # ─────────────────────────────────────────────
-# Captura a URL do Render. Se não achar, usa o SQLite local como padrão.
 raw_db_url = os.getenv("DATABASE_URL", "sqlite:///./weekplanner.db")
-
-# Correção obrigatória: SQLAlchemy 1.4+ exige 'postgresql://' em vez de 'postgres://'
 if raw_db_url.startswith("postgres://"):
     raw_db_url = raw_db_url.replace("postgres://", "postgresql://", 1)
 
 DATABASE_URL = raw_db_url
 
-# O SQLite exige um parâmetro especial de thread que o PostgreSQL não aceita.
 if "sqlite" in DATABASE_URL:
     engine = create_engine(DATABASE_URL, echo=False, connect_args={"check_same_thread": False})
 else:
@@ -44,6 +40,7 @@ class UserModel(Base):
     id        = Column(Integer, primary_key=True, index=True)
     nome      = Column(String(100), nullable=False)
     email     = Column(String(150), nullable=False, unique=True)
+    cargo     = Column(String(100), default="Membro") # NOVO CAMPO
     avatar    = Column(String(10), default=None)
     cor       = Column(String(7), default="#F37021") 
     criado_em = Column(DateTime, default=datetime.utcnow)
@@ -82,12 +79,22 @@ class TaskModel(Base):
     user = relationship("UserModel", back_populates="tasks")
     subtasks = relationship("SubTaskModel", back_populates="task", cascade="all, delete-orphan")
 
+class AvisoModel(Base):
+    __tablename__ = "avisos"
+    id         = Column(Integer, primary_key=True, index=True)
+    category   = Column(String(50), nullable=False)
+    type       = Column(String(50), nullable=True)
+    text       = Column(Text, nullable=False)
+    dataLimite = Column(String(50), nullable=True)
+    criado_em  = Column(DateTime, default=datetime.utcnow)
+
 # ─────────────────────────────────────────────
 # SCHEMAS (Pydantic)
 # ─────────────────────────────────────────────
 class UserCreate(BaseModel):
     nome:   str
     email:  str
+    cargo:  Optional[str] = "Membro"
     avatar: Optional[str] = None
     cor:    Optional[str] = "#F37021"
 
@@ -131,6 +138,17 @@ class TaskOut(TaskCreate):
     subtasks:      List[SubTaskOut] = []
     class Config: from_attributes = True
 
+class AvisoCreate(BaseModel):
+    category:   str
+    type:       Optional[str] = None
+    text:       str
+    dataLimite: Optional[str] = None
+
+class AvisoOut(AvisoCreate):
+    id: int
+    criado_em: datetime
+    class Config: from_attributes = True
+
 # ─────────────────────────────────────────────
 # APP & ROUTES
 # ─────────────────────────────────────────────
@@ -155,6 +173,13 @@ def create_user(payload: UserCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     return user
+
+@app.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_user(user_id: int, db: Session = Depends(get_db)):
+    user = db.query(UserModel).filter(UserModel.id == user_id).first()
+    if user:
+        db.delete(user)
+        db.commit()
 
 @app.get("/tasks", response_model=List[TaskOut])
 def list_tasks(db: Session = Depends(get_db)):
@@ -181,8 +206,9 @@ def update_task(task_id: int, payload: TaskUpdate, db: Session = Depends(get_db)
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_task(task_id: int, db: Session = Depends(get_db)):
     task = db.query(TaskModel).filter(TaskModel.id == task_id).first()
-    db.delete(task)
-    db.commit()
+    if task:
+        db.delete(task)
+        db.commit()
 
 @app.post("/tasks/{task_id}/subtasks", response_model=SubTaskOut)
 def add_subtask(task_id: int, payload: SubTaskCreate, db: Session = Depends(get_db)):
@@ -198,3 +224,22 @@ def toggle_subtask(subtask_id: int, concluida: bool, db: Session = Depends(get_d
     st.concluida = concluida
     db.commit()
     return {"status": "ok"}
+
+@app.get("/avisos", response_model=List[AvisoOut])
+def list_avisos(db: Session = Depends(get_db)):
+    return db.query(AvisoModel).order_by(AvisoModel.id.desc()).all()
+
+@app.post("/avisos", response_model=AvisoOut, status_code=status.HTTP_201_CREATED)
+def create_aviso(payload: AvisoCreate, db: Session = Depends(get_db)):
+    aviso = AvisoModel(**payload.model_dump())
+    db.add(aviso)
+    db.commit()
+    db.refresh(aviso)
+    return aviso
+
+@app.delete("/avisos/{aviso_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_aviso(aviso_id: int, db: Session = Depends(get_db)):
+    aviso = db.query(AvisoModel).filter(AvisoModel.id == aviso_id).first()
+    if aviso:
+        db.delete(aviso)
+        db.commit()
